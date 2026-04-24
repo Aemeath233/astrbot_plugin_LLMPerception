@@ -632,5 +632,18 @@ class MyPlugin(Star):
         logger.info(f"已添加感知信息: {perception_text}")
 
     async def terminate(self):
-        """Plugin shutdown hook (currently no-op)."""
-        return
+        task = self._dependency_check_task
+        self._dependency_check_task = None
+
+        if task is None:
+            return
+
+        if not task.done():
+            task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug(f"LLMPerception: 后台依赖检查任务结束异常: {exc}")
