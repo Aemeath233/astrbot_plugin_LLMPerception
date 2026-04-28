@@ -15,7 +15,7 @@
         "type": "bool",
         "description": "启用平台环境感知",
         "default": true,
-        "hint": "启用后会在消息中携带平台类型（QQ/Telegram等）、是否群聊、消息类型等环境信息"
+        "hint": "启用后会在消息中携带平台类型（QQ/Telegram等）、是否群聊、QQ/NapCat 群聊中的发言者身份和机器人身份、消息类型等环境信息"
     },
     "enable_lunar_perception": {
         "type": "bool",

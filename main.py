@@ -184,6 +184,12 @@ PLATFORM_DISPLAY_NAMES = {
     "misskey": "Misskey",
 }
 
+GROUP_ROLE_DISPLAY_NAMES = {
+    "owner": "群主",
+    "admin": "管理员",
+    "member": "普通用户",
+}
+
 
 @register("add_time", "miaomiao", "让每次请求都携带这次请求的时间", "1.1.0")
 class MyPlugin(Star):
@@ -495,6 +501,62 @@ class MyPlugin(Star):
             return None
         return candidate
 
+    @staticmethod
+    def _normalize_id(value) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @classmethod
+    def _get_event_group_id(cls, event: AstrMessageEvent) -> str:
+        group_id = ""
+        if hasattr(event, "get_group_id"):
+            group_id = event.get_group_id()
+        elif getattr(event, "message_obj", None):
+            group_id = getattr(event.message_obj, "group_id", "")
+        return cls._normalize_id(group_id)
+
+    @classmethod
+    def _get_event_self_id(cls, event: AstrMessageEvent) -> str:
+        self_id = ""
+        if hasattr(event, "get_self_id"):
+            self_id = event.get_self_id()
+        elif getattr(event, "message_obj", None):
+            self_id = getattr(event.message_obj, "self_id", "")
+        return cls._normalize_id(self_id)
+
+    @classmethod
+    def _get_event_sender_id(cls, event: AstrMessageEvent) -> str:
+        sender_id = ""
+        if hasattr(event, "get_sender_id"):
+            sender_id = event.get_sender_id()
+        else:
+            sender = getattr(getattr(event, "message_obj", None), "sender", None)
+            sender_id = getattr(sender, "user_id", "")
+        return cls._normalize_id(sender_id)
+
+    @staticmethod
+    def _to_onebot_id(value: str):
+        return int(value) if value.isdigit() else value
+
+    @staticmethod
+    def _get_field(data, key: str, default=None):
+        if isinstance(data, dict):
+            return data.get(key, default)
+        return getattr(data, key, default)
+
+    async def _call_onebot_action(
+        self, event: AstrMessageEvent, action: str, **params
+    ):
+        bot = getattr(event, "bot", None)
+        api = getattr(bot, "api", None) if bot else None
+
+        for target in (bot, api):
+            call_action = getattr(target, "call_action", None)
+            if callable(call_action):
+                return await call_action(action, **params)
+        return None
+
     async def _get_group_name(self, event: AstrMessageEvent) -> str | None:
         """优先从消息对象中读取群名称，否则调用协议端接口获取"""
         message_obj = getattr(event, "message_obj", None)
@@ -508,12 +570,7 @@ class MyPlugin(Star):
         if not callable(get_group_fn):
             return None
 
-        group_id = ""
-        if hasattr(event, "get_group_id"):
-            group_id = event.get_group_id()
-        elif message_obj:
-            group_id = getattr(message_obj, "group_id", "")
-
+        group_id = self._get_event_group_id(event)
         if not group_id:
             return None
 
@@ -528,6 +585,48 @@ class MyPlugin(Star):
             if group_name:
                 return group_name
         return None
+
+    async def _get_group_member_role(
+        self, event: AstrMessageEvent, user_id: str, subject: str
+    ) -> str | None:
+        """获取 QQ/NapCat 群聊中指定成员的群身份。"""
+        if event.get_platform_name() != "aiocqhttp":
+            return None
+
+        group_id = self._get_event_group_id(event)
+        if not group_id or not user_id:
+            return None
+
+        try:
+            member_info = await self._call_onebot_action(
+                event,
+                "get_group_member_info",
+                group_id=self._to_onebot_id(group_id),
+                user_id=self._to_onebot_id(user_id),
+                no_cache=False,
+            )
+        except Exception as exc:
+            logger.debug(f"LLMPerception: 获取{subject}群身份失败: {exc}")
+            return None
+
+        role = self._get_field(member_info, "role")
+        if not role:
+            return None
+
+        role = str(role).strip().lower()
+        return GROUP_ROLE_DISPLAY_NAMES.get(role, role)
+
+    async def _get_sender_group_role(self, event: AstrMessageEvent) -> str | None:
+        """获取 QQ/NapCat 群聊中发言者的群身份。"""
+        return await self._get_group_member_role(
+            event, self._get_event_sender_id(event), "发言者"
+        )
+
+    async def _get_bot_group_role(self, event: AstrMessageEvent) -> str | None:
+        """获取 QQ/NapCat 群聊中机器人自身的群身份。"""
+        return await self._get_group_member_role(
+            event, self._get_event_self_id(event), "机器人"
+        )
 
     async def _get_platform_info(self, event: AstrMessageEvent) -> str:
         """获取平台环境信息"""
@@ -555,11 +654,7 @@ class MyPlugin(Star):
         elif message_type == MessageType.FRIEND_MESSAGE:
             info_parts.append("私聊")
         else:
-            group_id = ""
-            if hasattr(event, "get_group_id"):
-                group_id = event.get_group_id()
-            elif getattr(event, "message_obj", None):
-                group_id = getattr(event.message_obj, "group_id", "")
+            group_id = self._get_event_group_id(event)
             if group_id:
                 info_parts.append("群聊")
                 is_group_chat = True
@@ -568,6 +663,12 @@ class MyPlugin(Star):
             group_name = await self._get_group_name(event)
             if group_name:
                 info_parts.append(f"群名: {group_name}")
+            sender_group_role = await self._get_sender_group_role(event)
+            if sender_group_role:
+                info_parts.append(f"发言者身份: {sender_group_role}")
+            bot_group_role = await self._get_bot_group_role(event)
+            if bot_group_role:
+                info_parts.append(f"机器人身份: {bot_group_role}")
 
         # 消息类型
         message_chain = event.message_obj
